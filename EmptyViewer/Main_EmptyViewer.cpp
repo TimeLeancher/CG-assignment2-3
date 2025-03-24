@@ -1,287 +1,246 @@
-#include <Windows.h>
 #include <iostream>
-#include <GL/glew.h>
-#include <GL/GL.h>
-#include <GL/freeglut.h>
+#include <vector>
+#include <cmath>
+#include <algorithm>
 
 #define GLFW_INCLUDE_GLU
 #define GLFW_DLL
 #include <GLFW/glfw3.h>
-#include <vector>
-
-#define GLM_SWIZZLE
 #include <glm/glm.hpp>
-#include <glm/gtc/constants.hpp>
-#include <glm/gtc/matrix_transform.hpp>
-#include <glm/gtx/string_cast.hpp>
-#include <glm/gtx/intersect.hpp>
+
 using namespace glm;
 
-// -------------------------------------------------
-// Global Variables
-// -------------------------------------------------
-int Width = 512;
-int Height = 512;
-std::vector<float> OutputImage;
+
+int Width = 512;  // 이미지 해상도 x
+int Height = 512; // 이미지 해상도 y
+std::vector<vec3> OutputImage;
 // -------------------------------------------------
 
-// 카메라 관련 변수 [cite: 6, 7]
-vec3 eye = vec3(0, 0, 0); // 시점
-vec3 u = vec3(1, 0, 0); // u 벡터
-vec3 v = vec3(0, 1, 0); // v 벡터
-vec3 w = vec3(0, 0, 1); // w 벡터 (카메라 방향은 -w)
-float l = -0.1f; // left
-float r = 0.1f;  // right
-float b = -0.1f; // bottom
-float t = 0.1f;  // top
-float d = 0.1f;  // distance to the image plane
 
-// 장면 구성 요소 [cite: 5, 6]
-struct Plane {
-	float y; // 평면의 y 좌표
+// Ray 클래스: 광선을 표현합니다.
+class Ray {
+public:
+    vec3 origin;    // 광선의 시작점
+    vec3 direction; // 광선의 방향 벡터
+
+    Ray(const vec3& origin, const vec3& direction) : origin(origin), direction(direction) {}
 };
 
-struct Sphere {
-	vec3 center; // 구의 중심
-	float radius; // 구의 반지름
+// Camera 클래스: 카메라를 표현합니다.
+class Camera {
+public:
+    vec3 eye;      // 카메라의 위치
+    vec3 u, v, w; // 카메라의 방향 (u, v, -w)
+
+    float l, r, b, t, d; // 뷰 영역 (left, right, bottom, top, distance)
+
+    Camera(const vec3& eye, const vec3& u, const vec3& v, const vec3& w,
+        float l, float r, float b, float t, float d)
+        : eye(eye), u(u), v(v), w(w), l(l), r(r), b(b), t(t), d(d) {
+    }
+
+    // 픽셀 좌표를 통해 광선을 생성하는 함수
+    Ray getRay(float ix, float iy) const {
+        float ndc_x = (ix + 0.5f) / Width;
+        float ndc_y = (iy + 0.5f) / Height;
+        float screen_x = l + (r - l) * ndc_x;
+        float screen_y = b + (t - b) * ndc_y;
+
+        vec3 ray_direction = normalize(-d * w + screen_x * u + screen_y * v);
+        return Ray(eye, ray_direction);
+    }
 };
 
-Plane plane = { -2.0f };
-Sphere sphere1 = { vec3(-4, 0, -7), 1.0f };
-Sphere sphere2 = { vec3(0, 0, -7), 2.0f };
-Sphere sphere3 = { vec3(4, 0, -7), 1.0f };
-
-// 광선 구조체
-struct Ray {
-	vec3 origin;    // 광선의 시작점
-	vec3 direction; // 광선의 방향
+// Surface 클래스: 모든 표면의 클래스입니다.
+class Surface {
+public:
+    virtual bool intersect(const Ray& ray, float& t) const = 0;
+    virtual vec3 getNormal(const vec3& point) const = 0;
 };
 
-// 광선 생성 함수
-Ray generateRay(int x, int y) {
-	float ndcx = (float)x / (float)Width;
-	float ndcy = (float)y / (float)Height;
-	float p_x = l + (r - l) * ndcx;
-	float p_y = b + (t - b) * ndcy;
+// Plane 클래스: 평면을 표현합니다.
+class Plane : public Surface {
+public:
+    float y; // 평면의 y 좌표
 
-	return {
-		eye,
-		normalize(-d * w + p_x * u + p_y * v)
-	};
+    Plane(float y) : y(y) {}
+
+    bool intersect(const Ray& ray, float& t) const override {
+        if (abs(ray.direction.y) < 1e-6) { // 광선이 평면과 평행한 경우
+            return false;
+        }
+        t = (this->y - ray.origin.y) / ray.direction.y;
+        return t > 0; // 교차점이 광선 방향에 있어야 함
+    }
+
+    vec3 getNormal(const vec3& point) const override {
+        return vec3(0, 1, 0); // 평면의 법선 벡터는 (0, 1, 0)
+    }
+};
+
+// Sphere 클래스: 구를 표현합니다.
+class Sphere : public Surface {
+public:
+    vec3 center; // 구의 중심
+    float radius; // 구의 반지름
+
+    Sphere(const vec3& center, float radius) : center(center), radius(radius) {} // 구의 중심 좌표(center)와 반지름(radius)을 인자로 받아 초기화
+
+    bool intersect(const Ray& ray, float& t) const override {
+        vec3 oc = ray.origin - center;
+        float a = dot(ray.direction, ray.direction);
+		float b = 2.0f * dot(oc, ray.direction);
+		float c = dot(oc, oc) - radius * radius;
+		float discriminant = b * b - 4 * a * c;// 판별식
+
+        if (discriminant < 0) {
+			return false; //교차점이 없는 경우 false 반환
+        }
+		// 교차점이 두 개인 경우 더 작은 값 선택
+        t = (-b - ::sqrt(discriminant)) / (2 * a);
+        if (t < 0) {
+            t = (-b + ::sqrt(discriminant)) / (2 * a);
+		}// 교차점이 광선 방향에 있으면 true 반환
+        return t > 0;
+    }
+
+    vec3 getNormal(const vec3& point) const override {
+        return normalize(point - center);
+    }
+};
+
+// Scene 클래스: 장면을 관리합니다.
+class Scene {
+public:
+    std::vector<Surface*> objects;
+    Camera camera;
+
+    Scene(const Camera& camera) : camera(camera) {}
+
+    void addObject(Surface* object) {
+        objects.push_back(object);
+    }
+
+    // 광선 추적 함수
+    vec3 trace(const Ray& ray) const {
+        float closest_t = INFINITY;
+        Surface* closest_surface = nullptr;
+		// 모든 객체에 대해 가장 가까운 교차점을 가진 객체를 찾음
+        for (Surface* object : objects) { 
+            float t; 
+            if (object->intersect(ray, t) && t < closest_t) {
+				closest_t = t; 
+                closest_surface = object;
+            }
+        }
+        //가장 가까운 교차점을 가진 객체가 있는가
+        if (closest_surface) {
+            return vec3(1.0f, 1.0f, 1.0f); // 흰색 반환
+        }
+        else {
+            return vec3(0.0f, 0.0f, 0.0f); // 검은색 반환
+        }
+    }
+};
+
+// -------------------------------------------------
+
+void render(Scene& scene) {
+	OutputImage.clear(); // OutputImage 초기화
+    for (int j = 0; j < Height; ++j) {
+        for (int i = 0; i < Width; ++i) {
+			Ray ray = scene.camera.getRay(i, j); // 카메라의 픽셀 좌표로 광선 생성
+			vec3 color = scene.trace(ray); // 광선 추적
+			OutputImage.push_back(color); // OutputImage에 색상 추가
+        }
+    }
 }
 
-// 광선-평면 교차 함수
-float intersectRayPlane(const Ray& ray, const Plane& plane) {
-	if (abs(ray.direction.y) < 1e-6) {
-		return -1.0f; // 광선이 평면과 평행
-	}
-	float t = (plane.y - ray.origin.y) / ray.direction.y;
-	if (t > 0) {
-		return t;
-	}
-	return -1.0f; // 교차점이 없음
+void resize_callback(GLFWwindow*, int nw, int nh) {
+    Width = nw;
+    Height = nh;
+    glViewport(0, 0, nw, nh);
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    glOrtho(0.0, static_cast<double>(Width),
+        0.0, static_cast<double>(Height),
+        1.0, -1.0);
+    OutputImage.resize(Width * Height);
 }
 
-// 광선-구 교차 함수
-float intersectRaySphere(const Ray& ray, const Sphere& sphere) {
-	vec3 oc = ray.origin - sphere.center;
-	float a = dot(ray.direction, ray.direction);
-	float b = 2.0f * dot(oc, ray.direction);
-	float c = dot(oc, oc) - sphere.radius * sphere.radius;
-	float discriminant = b * b - 4 * a * c;
+int main(int argc, char* argv) {
+    // -------------------------------------------------
+    // Initialize Window
+    // -------------------------------------------------
+    GLFWwindow* window;
 
-	if (discriminant < 0) {
-		return -1.0f; // 광선이 구를 지나가지 않음
-	}
-	else {
-		float t = (-b - std::sqrt(discriminant)) / (2.0f * a);
-		if (t > 0) {
-			return t;
-		}
-		return -1.0f;
-	}
-}
+    /* Initialize the library */
+    if (!glfwInit())
+        return -1;
 
-// 가장 가까운 교차점 찾기 함수
-std::pair<int, float> findClosestIntersection(const Ray& ray) {
-	float closestT = INFINITY;
-	int closestObjectIndex = -1; // 0: plane, 1: sphere1, 2: sphere2, 3: sphere3
+    /* Create a windowed mode window and its OpenGL context */
+    window = glfwCreateWindow(Width, Height, "OpenGL Viewer", NULL, NULL);
+    if (!window) {
+        glfwTerminate();
+        return -1;
+    }
 
-	float tPlane = intersectRayPlane(ray, plane);
-	if (tPlane > 0 && tPlane < closestT) {
-		closestT = tPlane; // 교차점이 평면일 경우
-		closestObjectIndex = 0;
-	}
+    /* Make the window's context current */
+    glfwMakeContextCurrent(window);
 
-	float tSphere1 = intersectRaySphere(ray, sphere1);
-	if (tSphere1 > 0 && tSphere1 < closestT) {
-		closestT = tSphere1; // 교차점이 구1일 경우
-		closestObjectIndex = 1;
-	}
+    //We have an opengl context now. Everything from here on out 
+    //is just managing our window or opengl directly.
 
-	float tSphere2 = intersectRaySphere(ray, sphere2);
-	if (tSphere2 > 0 && tSphere2 < closestT) {
-		closestT = tSphere2; // 교차점이 구2일 경우
-		closestObjectIndex = 2;
-	}
+    //Tell the opengl state machine we don't want it to make 
+    //any assumptions about how pixels are aligned in memory 
+    //during transfers between host and device (like glDrawPixels(...) )
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
 
-	float tSphere3 = intersectRaySphere(ray, sphere3);
-	if (tSphere3 > 0 && tSphere3 < closestT) {
-		closestT = tSphere3; //	교차점이 구3일 경우
-		closestObjectIndex = 3;
-	}
+    //We call our resize function once to set everything up initially
+    //after registering it as a callback with glfw
+    glfwSetFramebufferSizeCallback(window, resize_callback);
+    resize_callback(NULL, Width, Height);
 
-	return std::make_pair(closestObjectIndex, closestT);
-}
+    // -------------------------------------------------
+    // Scene Setup
+    // -------------------------------------------------
+    Camera camera(vec3(0, 0, 0), vec3(1, 0, 0), vec3(0, 1, 0), vec3(0, 0, 1),
+        -0.1f, 0.1f, -0.1f, 0.1f, 0.1f);
+    Scene scene(camera);
+    scene.addObject(new Plane(-2.0f));
+    scene.addObject(new Sphere(vec3(-4, 0, -7), 1.0f));
+    scene.addObject(new Sphere(vec3(0, 0, -7), 2.0f));
+    scene.addObject(new Sphere(vec3(4, 0, -7), 1.0f));
 
+    OutputImage.resize(Width * Height); // OutputImage 크기 설정
+    render(scene);
 
-void render() {
-	OutputImage.clear();
-	for (int y = 0; y < Height; ++y) {
-		for (int x = 0; x < Width; ++x) {
-			Ray ray = generateRay(x, y);
-			std::pair<int, float> closestIntersection = findClosestIntersection(ray);
+    /* Loop until the user closes the window */
+    while (!glfwWindowShouldClose(window)) {
+        //Clear the screen
+        glClear(GL_COLOR_BUFFER_BIT);
 
-			if (closestIntersection.first != -1) {
-				// 교차하는 물체가 있을 경우 흰색
-				OutputImage.push_back(1.0f); // R
-				OutputImage.push_back(1.0f); // G
-				OutputImage.push_back(1.0f); // B
-			}
-			else {
-				// 교차하는 물체가 없을 경우 검은색
-				OutputImage.push_back(0.0f); // R
-				OutputImage.push_back(0.0f); // G
-				OutputImage.push_back(0.0f); // B
-			}
-		}
-	}
-}
-/*
- void render()
-{
-	//Create our image. We don't want to do this in 
-	//the main loop since this may be too slow and we 
-	//want a responsive display of our beautiful image.
-	//Instead we draw to another buffer and copy this to the 
-	//framebuffer using glDrawPixels(...) every refresh
-	OutputImage.clear();
-	for (int j = 0; j < Height; ++j) 
-	{
-		for (int i = 0; i < Width; ++i) 
-		{
-			// ---------------------------------------------------
-			// --- Implement your code here to generate the image
-			// ---------------------------------------------------
+        // -------------------------------------------------------------
+        //Rendering begins!
+        glDrawPixels(Width, Height, GL_RGB, GL_FLOAT, &OutputImage[0]);
+        //and ends.
+        // -------------------------------------------------------------
 
-			// draw a red rectangle in the center of the image   이 부분 지우고 하기 
-			vec3 color = glm::vec3(0.5f, 0.5f, 0.5f); // grey color [0,1] in RGB channel
-			
-			if (i > Width / 4 && i < 3 * Width / 4 
-				&& j > Height / 4 && j < 3 * Height / 4)
-			{
-				color = glm::vec3(1.0f, 0.0f, 0.0f); // red color [0,1] in RGB channel
-			}
-			
-			// set the color
-			OutputImage.push_back(color.x); // R
-			OutputImage.push_back(color.y); // G
-			OutputImage.push_back(color.z); // B
-		}
-	}
-}
+        /* Swap front and back buffers */
+        glfwSwapBuffers(window);
 
-*/
-void resize_callback(GLFWwindow*, int nw, int nh) 
-{
-	//This is called in response to the window resizing.
-	//The new width and height are passed in so we make 
-	//any necessary changes:
-	Width = nw;
-	Height = nh;
-	//Tell the viewport to use all of our screen estate
-	glViewport(0, 0, nw, nh);
+        /* Poll for and process events */
+        glfwPollEvents();
 
-	//This is not necessary, we're just working in 2d so
-	//why not let our spaces reflect it?
-	glMatrixMode(GL_PROJECTION);
-	glLoadIdentity();
+        //Close when the user hits 'q' or escape
+        if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS ||
+            glfwGetKey(window, GLFW_KEY_Q) == GLFW_PRESS) {
+            glfwSetWindowShouldClose(window, GL_TRUE);
+        }
+    }
 
-	glOrtho(0.0, static_cast<double>(Width)
-		, 0.0, static_cast<double>(Height)
-		, 1.0, -1.0);
-
-	//Reserve memory for our render so that we don't do 
-	//excessive allocations and render the image
-	OutputImage.reserve(Width * Height * 3);
-	render();
-}
-
-
-int main(int argc, char* argv[])
-{
-	// -------------------------------------------------
-	// Initialize Window
-	// -------------------------------------------------
-
-	GLFWwindow* window;
-
-	/* Initialize the library */
-	if (!glfwInit())
-		return -1;
-
-	/* Create a windowed mode window and its OpenGL context */
-	window = glfwCreateWindow(Width, Height, "OpenGL Viewer", NULL, NULL);
-	if (!window)
-	{
-		glfwTerminate();
-		return -1;
-	}
-
-	/* Make the window's context current */
-	glfwMakeContextCurrent(window);
-
-	//We have an opengl context now. Everything from here on out 
-	//is just managing our window or opengl directly.
-
-	//Tell the opengl state machine we don't want it to make 
-	//any assumptions about how pixels are aligned in memory 
-	//during transfers between host and device (like glDrawPixels(...) )
-	glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-	glPixelStorei(GL_PACK_ALIGNMENT, 1);
-
-	//We call our resize function once to set everything up initially
-	//after registering it as a callback with glfw
-	glfwSetFramebufferSizeCallback(window, resize_callback);
-	resize_callback(NULL, Width, Height);
-
-	/* Loop until the user closes the window */
-	while (!glfwWindowShouldClose(window))
-	{
-		//Clear the screen
-		glClear(GL_COLOR_BUFFER_BIT);
-
-		// -------------------------------------------------------------
-		//Rendering begins!
-		glDrawPixels(Width, Height, GL_RGB, GL_FLOAT, &OutputImage[0]);
-		//and ends.
-		// -------------------------------------------------------------
-
-		/* Swap front and back buffers */
-		glfwSwapBuffers(window);
-
-		/* Poll for and process events */
-		glfwPollEvents();
-
-		//Close when the user hits 'q' or escape
-		if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS
-			|| glfwGetKey(window, GLFW_KEY_Q) == GLFW_PRESS)
-		{
-			glfwSetWindowShouldClose(window, GL_TRUE);
-		}
-	}
-
-	glfwDestroyWindow(window);
-	glfwTerminate();
-	return 0;
+    glfwDestroyWindow(window);
+    glfwTerminate();
+    return 0;
 }
